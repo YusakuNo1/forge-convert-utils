@@ -9,6 +9,7 @@ const fs = require("fs");
 const zlib = require("zlib");
 const { PropDbReader } = require("../lib/common/propdb-reader.js");
 const { SvfReader, GltfWriter } = require("../lib");
+const writeFileAsync = require('./utils').writeFileAsync;
 
 const FIELDS = {
   I_NAME: 0,
@@ -60,13 +61,12 @@ function escapeString(str) {
   return str;
 }
 
-async function run(dir, svfPath, outputPath, excludedDbids) {
+async function run(dir, svfPath, outputPath) {
   const ids = fs.readFileSync(path.join(dir, "objects_ids.json.gz"));
   const offs = fs.readFileSync(path.join(dir, "objects_offs.json.gz"));
   const avs = fs.readFileSync(path.join(dir, "objects_avs.json.gz"));
   const attrs = fs.readFileSync(path.join(dir, "objects_attrs.json.gz"));
   const vals = fs.readFileSync(path.join(dir, "objects_vals.json.gz"));
-  const excludedDbidArray = (excludedDbids ? excludedDbids : '').split(',');
   
   const db = new PropDbReader(ids, offs, avs, attrs, vals);
 
@@ -81,8 +81,16 @@ async function run(dir, svfPath, outputPath, excludedDbids) {
   const exportedBIM = {};
   const rootNodes = [];
 
+  // Need 3 mechanism to find rootNodes
+  // 1. Find nodes with category "__parent__" and value is 1
+  // 2. Find nodes with no parents or parents array is empty
+  // 3. Search orphan nodes which can't be accessed from rootNodes from #1 and #2
+  // 4. Add the parents or orphan nodes and exclude the previous rootNodes if their parent is the new parent node
+
+  const allDbids = new Set();
   while (idsToExport.length > 0) {
     const dbid = idsToExport.shift();
+    allDbids.add('' + dbid);
 
     if (!exportedBIM[dbid]) {
       const doc = {
@@ -105,7 +113,7 @@ async function run(dir, svfPath, outputPath, excludedDbids) {
           doc.parents.push(`${prop.value}`);
           idsToExport.push(prop.value);
           if (prop.value === 1) {
-            rootNodes.push(dbid);
+            rootNodes.push('' + dbid);
           }
         } else if (prop.category === "__category__") {
           if (doc.categories[prop.name]) {
@@ -152,68 +160,75 @@ async function run(dir, svfPath, outputPath, excludedDbids) {
         }
       }
 
+      // for the nodes with no parents, add it as root node
+      if (!doc.parents || doc.parents.length === 0) {
+        rootNodes.push('' + dbid);
+      }
+
       exportedBIM[dbid] = doc;
     }
   }
   exportedBIM.rootNodes = rootNodes;
 
-  const output = fs.createWriteStream(path.join(outputPath, 'bim.json'));
-  output.write(JSON.stringify(exportedBIM, null, 2) + "\n");
-
-
-  // Create hierarchy related JSONs
-  const exportedBIMHierarchy = {};
-  const excludedDbidJson = new Set();
-  function genKey(nodeKey) {
-    return `[DBID: ${nodeKey}] ${exportedBIM[nodeKey].name}`;
+  console.log('* rootNodes', rootNodes);
+  // 1. Find orphan nodes from rootNodes
+  let dbidQueue = [...rootNodes];
+  while (dbidQueue.length > 0) {
+    const dbid = dbidQueue.splice(0, 1)[0]; // get the first dbid
+    allDbids.delete(dbid);
+    const children = exportedBIM[dbid].children ? exportedBIM[dbid].children : [];
+    children.forEach(childDbid => dbidQueue.push(childDbid));
   }
-  
-  function processNode(nodeKey, shouldExclude) {
-    const node = exportedBIM[nodeKey];
 
-    if (shouldExclude || excludedDbidArray.includes(nodeKey)) {
-      excludedDbidJson.add(nodeKey);
-      if (node.children) {
-        node.children.forEach(childNodeKey => processNode(childNodeKey, true));
-      }
-      return undefined; // should exclude
+  console.log('* remaining allDbids', allDbids.size);
+
+  // 2. Find parents of all these orphan nodes and also fix the parent -> child linking
+  const newRootNodeSet = new Set();
+  function findParents(dbid) {
+    const parents = exportedBIM[dbid].parents;
+    if (!parents || parents.length === 0) {
+      newRootNodeSet.add(dbid);
     } else {
-      if (node.children) {
-        const newChildren = {};
-        node.children.forEach(childNodeKey => {
-          const nodeName = processNode(childNodeKey, false);
-          if (nodeName) {
-            newChildren[nodeName] = exportedBIM[childNodeKey];
-          }
-        });
-        node.children = newChildren;
-      }
-
-      return genKey(nodeKey); // should not be excluded
+      parents.forEach(parentDbid => {
+        // Fix parent -> child linking
+        exportedBIM[parentDbid].children = !!exportedBIM[parentDbid].children ? exportedBIM[parentDbid].children : [];
+        if (!exportedBIM[parentDbid].children.includes(dbid)) {
+          exportedBIM[parentDbid].children.push(dbid);
+        }
+        findParents(parentDbid);
+      });
     }
   }
-  
-  function createBimHierarchy() {
-    exportedBIM.rootNodes
-      .map(rootNodeKey => '' + rootNodeKey) // root node key is number, the rest of keys are string
-      .forEach(nodeKey => {
-        const nodeName = processNode(nodeKey, false);
-        if (nodeName) {
-          exportedBIMHierarchy[nodeName] = exportedBIM[nodeKey];
-        }
-      });
-  }
-  
-  createBimHierarchy();
-  const outputHierarchy = fs.createWriteStream(path.join(outputPath, 'bim_hierarchy.json'));
-  outputHierarchy.write(JSON.stringify(exportedBIMHierarchy, null, 2) + "\n");
+  allDbids.forEach(findParents);
 
-  const outputHierarchyExcludedDbidJson = fs.createWriteStream(path.join(outputPath, 'bim_hierarchy_excluded.json'));
-  outputHierarchyExcludedDbidJson.write(JSON.stringify([...excludedDbidJson], null, 2) + "\n");
+  // 3. Add parents to rootNodes
+  console.log('* rootNodes before adding extra parent', rootNodes);
+  [...newRootNodeSet].forEach(dbid => {
+    if (!rootNodes.includes(dbid)) {
+      rootNodes.push(dbid);
+    }
+  });
+
+  // 4. Add the parents or orphan nodes and exclude the previous rootNodes if their parent is the new parent node
+  [...rootNodes].forEach(dbid => {
+    const children = exportedBIM[dbid].children;
+    console.log('* children of dbid', typeof dbid, dbid, exportedBIM[dbid].children);
+    if (children) {
+      children.forEach(childDbid => {
+        const index = rootNodes.indexOf(childDbid);
+        if (index >= 0) {
+          console.log(`* remove ${childDbid} from rootNodes`);
+          rootNodes.splice(index, 1);
+        }
+      })
+    }
+  });
+
+  writeFileAsync(path.join(outputPath, 'bim.json'), exportedBIM).then(() => console.log('done...'));
 }
 
-if (process.argv.length >= 4) {
-  run(process.argv[2], process.argv[3], process.argv[4], process.argv[5])
+if (process.argv.length >= 5) {
+  run(process.argv[2], process.argv[3], process.argv[4])
     .then(() => {})
     .catch((err) => {
       console.error(err);
@@ -222,6 +237,6 @@ if (process.argv.length >= 4) {
 } else {
   console.log("Usage:");
   console.log(
-    "  node local-svf-to-bim.js <folder with objects_*.json.gz files> <path to svf> <output path> <excluded dbids>"
+    "  node local-svf-to-bim.js <folder with objects_*.json.gz files> <path to svf> <output path>"
   );
 }

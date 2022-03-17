@@ -37,9 +37,14 @@
     "typescript": "^4.5.5"
   },
   "dependencies": {
+    "JSONStream": "^1.3.5",
     "adm-zip": "^0.5.9",
+    "big-json": "^3.1.0",
     "commander": "^3.0.2",
+    "event-stream": "^4.0.1",
     "forge-server-utils": "^8.3.5",
-    "fs-extra": "^10.0.0"
+    "fs-extra": "^10.0.0",
+    "json-stream-stringify": "^2.0.4",
+    "stream-json": "^1.7.4"
   }
 }

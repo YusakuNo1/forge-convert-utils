@@ -21,7 +21,6 @@ async function run (filepath, outputDir, excludedDbidsJsonFilePath) {
         center: true,
         log: console.log,
         filter: (dbid) => {
-            console.log('dbid: ', dbid, typeof dbid, excludedDbidArray.includes(dbid));
             return !excludedDbidArray.includes(dbid);
         },
     };
@@ -30,10 +29,10 @@ async function run (filepath, outputDir, excludedDbidsJsonFilePath) {
         const reader = await SvfReader.FromFileSystem(filepath);
         const scene = await reader.read();
         let writer;
-        // writer = new GltfWriter(Object.assign({}, defaultOptions));
-        // await writer.write(scene, path.join(outputDir, 'gltf-raw'));
-        writer = new GltfWriter(Object.assign({}, defaultOptions, { deduplicate: true, skipUnusedUvs: true }));
-        await writer.write(scene, path.join(outputDir, 'gltf-dedup'));
+        writer = new GltfWriter(Object.assign({}, defaultOptions));
+        await writer.write(scene, path.join(outputDir, 'gltf-raw'));
+        // writer = new GltfWriter(Object.assign({}, defaultOptions, { deduplicate: true, skipUnusedUvs: true }));
+        // await writer.write(scene, path.join(outputDir, 'gltf-dedup'));
     } catch(err) {
         console.error(err);
         process.exit(1);

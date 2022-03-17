@@ -1,6 +1,7 @@
 import * as path from 'path';
 import crypto from 'crypto';
 import * as fse from 'fs-extra';
+import JsonStreamStringify from 'json-stream-stringify';
 
 import * as gltf from './schema';
 import { isUndefined, isNullOrUndefined } from 'util';
@@ -116,12 +117,20 @@ export class Writer {
             delete this.manifest.images;
 
         const gltfPath = path.join(this.baseDir, 'output.gltf');
-        fse.writeFileSync(gltfPath, JSON.stringify(this.manifest, null, 4));
+        // fse.writeFileSync(gltfPath, JSON.stringify(this.manifest, null, 4));
+        this.writeFileSync(gltfPath, this.manifest);
         this.options.log(`Closing gltf output: done`);
         this.options.log(`Stats: ${JSON.stringify(this.stats)}`);
         await this.postprocess(imf, gltfPath);
     }
 
+    protected writeFileSync(gltfPath: string, json: any) {
+        const outputStream = fse.createWriteStream(gltfPath);
+        const jsonStream = new JsonStreamStringify(json);
+        jsonStream.once('error', (err) => console.error('Error', err));
+        jsonStream.pipe(outputStream);
+    }
+    
     protected reset(outputDir: string) {
         this.baseDir = outputDir;
         this.manifest = {
